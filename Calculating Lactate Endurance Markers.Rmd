@@ -1,0 +1,740 @@
+---
+title: "Calculating Lactate Endurance Markers"
+author: "Tommy Clark"
+date: "`r Sys.Date()`"
+output: html_document
+---
+<style type="text/css">
+
+body, td {
+   font-size: 16px;
+}
+code.r{
+  font-size: 16px;
+}
+pre {
+  font-size: 16px
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(splines)
+library(admisc)
+library(pspline)
+library(cycleRtools)
+library(readxl)
+library(JOPS)
+library(pspline)
+library(splus2R)
+library(kableExtra)
+```
+In this document, we will use R to reproduce calculations for several lactate endurance
+markers.
+
+## Plotting the Data
+First, we'll load in our athlete sample data and display the scatter plot of lactate concentration vs. treadmill speed, fitted with a cubic regression line.
+```{r, message = F}
+Athlete_Sample_Data <- read_csv("C:/Users/t_cla/OneDrive/Old Classes/Research/Athlete Sample Data.csv")
+colnames(Athlete_Sample_Data) <- c("Speed", "Lactate", "Heart_Rate")
+
+ggplot(Athlete_Sample_Data, aes(x = Speed, y = Lactate)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = F) + 
+  labs(x = "Speed (km/hr)", y = "Lactate (mM)") + 
+  ggtitle("Cubic Fit for a Typical Blood Lactate Curve") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 12.5), 
+        text = element_text(family = "serif"),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_text(size = 11, color = "black"),
+        axis.text.y = element_text(size = 11, color = "black"))
+```
+
+
+## First endurance marker: Fixed Blood Lactate Concentration (FBLC)
+This simple marker represents the speed corrresponding to a fixed blood lactate concentration, typically 4 mmol/L.\
+Here, I have created a function which takes a dataframe (assumed to contain a column called "Lactate" and a column called "Speed") and a lactate concentration value (set to 4 as default). It returns the corresponding speed at the desired value.
+```{r}
+fixed_conc <- function(df, value = 4) {
+  df <- df %>%
+    drop_na()
+  model <- lm(Lactate ~ poly(Speed,3, raw = T), data = df)
+  coef_df <- data.frame(model$coefficients)
+  coeffs <- c(coef_df[1,1] - value, coef_df[2,1], coef_df[3,1], coef_df[4,1])
+  roots <- polyroot(coeffs)
+  real_roots <- Re(roots[abs(Im(roots)) <= 1e-10 & Re(roots) >= min(df$Speed) & Re(roots) <= 16.5])
+  real_roots
+}
+```
+Using our sample data and a lactate concentration of 4, let's see what we get for the FBLC:
+```{r}
+fixed_conc(df = Athlete_Sample_Data, value = 4)
+```
+To check the feasibility of this value, let's plot the data and see where a lactate concentration of 4 mmol/L intersects with the regression curve.
+```{r}
+ggplot(Athlete_Sample_Data, aes(x = Speed, y = Lactate)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = F) + 
+  geom_hline(yintercept = 4) + 
+  geom_vline(xintercept = fixed_conc(df = Athlete_Sample_Data, value = 4)) + 
+  labs(x = "Speed (km/hr)", y = "Lactate (mM)") + 
+  ggtitle("Fixed Blood Lactate Concentration at 4 mM Using Cubic Regression (FBLC = 15.3801)") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 12.5), 
+        text = element_text(family = "serif"),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_text(size = 11, color = "black"),
+        axis.text.y = element_text(size = 11, color = "black"))
+```
+
+15.3801 seems highly reasonable!
+
+## Second endurance marker: Fixed Rise Post Baseline (FRPB)
+This marker represents the speed at which the athlete's blood lactate concentration has risen from 1 mmol/L (or some other desired value) from their baseline concentration.
+Here, I have created a function which takes a data frame (assumed to contain a column called "Speed" and a column called "Lactate"), a value for the fixed rise (set to 1 at default), and a threshold for determining the appropriate number of data points to average over as the baseline. If the standard deviation of the first n data points is larger than that threshold, then it will take the first (n - 1) data points and try again.
+```{r}
+from_baseline <- function(df, value = 1, threshold = .1) {
+  df_ordered <- df %>%
+    arrange(Speed) %>%
+    drop_na()
+  n <- 6
+  while (sd(df_ordered$Lactate[1:n]) >= threshold & n > 1) {
+    n <- n - 1
+  }
+  baseline <- mean(df_ordered$Lactate[1:n])
+  model <- lm(Lactate ~ poly(Speed,3, raw = T), data = df_ordered)
+  coef_df <- data.frame(model$coefficients)
+  coeffs <- c(coef_df[1,1] - (value + baseline), coef_df[2,1], coef_df[3,1], coef_df[4,1])
+  roots <- polyroot(coeffs)
+  real_roots <- Re(roots[abs(Im(roots)) <= 1e-10 & Re(roots) >= min(df_ordered$Speed) & Re(roots) <= max(df_ordered$Speed)])
+  real_roots
+}
+```
+Let's try it out with the sample data, keeping the fixed rise at 1 mmol/L and the threshold at 0.1:
+```{r}
+from_baseline(df = Athlete_Sample_Data, value = 1)
+```
+Is this value reasonable? Let's check out the plot of the data to find out:
+```{r}
+n <- 6
+while (sd(Athlete_Sample_Data$Lactate[1:n]) >= .1) {
+  n <- n - 1
+}
+baseline <- mean(Athlete_Sample_Data$Lactate[1:n])
+ggplot(Athlete_Sample_Data, aes(x = Speed, y = Lactate)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = F) + 
+  geom_hline(yintercept = baseline) + 
+  geom_hline(yintercept = baseline + 1) + 
+  geom_vline(xintercept = from_baseline(df = Athlete_Sample_Data, value = 1)) + 
+  labs(x = "Speed (km/hr)", y = "Lactate (mM)") + 
+  ggtitle("Fixed Rise Post Baseline of 1 mM Using Cubic Regression (FRPB = 13.9657)") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 12.5), 
+        text = element_text(family = "serif"),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_text(size = 11, color = "black"),
+        axis.text.y = element_text(size = 11, color = "black"))
+```
+
+Here, the baseline value was calculated to be 0.554, and so the corresponding speed at a lactate concentration of 1.554 came out to 13.9657 -- highly reasonable!
+
+## Third endurance marker: Lactate Threshold (LT and LT_log_log)
+This marker represents the point on the lactate curve corresponding to a departure from a linear baseline pattern. It is estimated by fitting the data with the 'broken stick' linear regression model with the lowest mean squared error. 
+Some researchers have suggested taking the log transformation of both lactate and workload/speed, called "LT log log", in order to gain a better estimate of the lactate threshold.
+My function takes a data frame (assumed to contain a column called "Lactate" and a column called "Speed"), an option to calculate LT log log rather than LT (set to FALSE as default), and the interval of knot location values to test for the lowest mean squared error (default = 0.01).The function returns the optimal location of the knot in the broken stick model, which also corresponds to the Lactate Threshold (LT or LT_log_log).
+```{r}
+lactate_threshold <- function(dataframe, log_log = FALSE, interval = 0.01) {
+  if (log_log == FALSE) {
+    df <- dataframe %>%
+      drop_na()
+  }
+  else if (log_log == TRUE) {
+    df <- dataframe %>%
+      drop_na() %>%
+      mutate(Speed = log(Speed),
+             Lactate = log(Lactate))
+  }
+  try_linear_spline <- function(knot) {
+    model <- lm(Lactate ~ bs(Speed, knots = knot, degree = 1), data = df)
+    return(mean(model$residuals^2))
+  }
+  potential_knots <- seq(from = round(min(df$Speed), numdec(interval)), to = round(max(df$Speed), numdec(interval)), 
+                         by = interval)
+  rse_values <- sapply(potential_knots, try_linear_spline)
+  knot_location <- potential_knots[which.min(rse_values)]
+  knot_location
+}
+
+```
+
+Let's try it out, first with log_log set to FALSE.
+```{r}
+lactate_threshold(Athlete_Sample_Data, interval = 0.01, log_log = F)
+```
+Checking on the feasibility of this value:
+```{r}
+ggplot(Athlete_Sample_Data, aes(x = Speed, y = Lactate)) + 
+  geom_point()  + 
+  geom_smooth(method = "lm", formula = y ~ bs(x, knots = lactate_threshold(Athlete_Sample_Data, log_log = F), degree = 1)) + 
+  geom_vline(xintercept = lactate_threshold(Athlete_Sample_Data, log_log = F)) + 
+  labs(x = "Speed (km/hr)", y = "Lactate (mM)") + 
+  ggtitle('Lactate Threshold Using "Broken Stick" Linear Regression (LT = 14.75)') + 
+  theme(plot.title = element_text(hjust = 0.5, size = 12.5), 
+        text = element_text(family = "serif"),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_text(size = 11, color = "black"),
+        axis.text.y = element_text(size = 11, color = "black"))
+```
+
+14.75 looks great! \
+Now, let's test out the log_log option:
+```{r}
+lactate_threshold(Athlete_Sample_Data, interval = 0.001, log_log = T)
+```
+Does this value make sense when we look at the graph?
+```{r}
+ggplot(Athlete_Sample_Data, aes(x = log(Speed), y = log(Lactate))) + 
+  geom_point()  + 
+  geom_smooth(method = "lm", formula = y ~ bs(x, knots = lactate_threshold(Athlete_Sample_Data, interval = 0.001, log_log = T), degree = 1)) + 
+  geom_vline(xintercept = lactate_threshold(Athlete_Sample_Data, log_log = T, interval = .001)) + 
+  labs(x = "Natural Log of Speed", y = "Natural Log of Lactate") + 
+  ggtitle('Lactate Threshold "Log-Log" Using "Broken Stick" Linear Regression (LT_log_log = 2.493)') + 
+  theme(plot.title = element_text(hjust = 0.5, size = 12.5), 
+        text = element_text(family = "serif"),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_text(size = 11, color = "black"),
+        axis.text.y = element_text(size = 11, color = "black"))
+```
+
+Yes it does! (Although the interpretation of the value will be different now.) Taking the exponential of 2.493, as is typically done in presenting the value for LT_log_log, yields 12.0975.
+
+## Fourth endurance marker: DMax
+For this marker, a linear regression line is drawn connecting the first and last lactate measurements (L2), and DMax represents the speed corresponding to the point on the cubic regression line (L1) with the maximum perpendicular distance from L2. This point also corresponds to the speed where the derivative of L2 is equal to the derivative of L1.
+The function that I have created for this marker takes a data frame (assumed to have a column called "Lactate" and a column called "Speed") and returns the desired speed value.
+```{r}
+DMax <- function(df) {
+  df <- df %>%
+    drop_na()
+  df_small <- df[c(1, length(df$Lactate)), ]
+  linear_model <- lm(Lactate ~ Speed, data = df_small)
+  linear_coefs <- data.frame(linear_model$coefficients)
+  linear_slope <- linear_coefs[2,1]
+  
+  cubic_model <- lm(Lactate ~ poly(Speed,3, raw = T), data = df)
+  cubic_coefs <- data.frame(cubic_model$coefficients)
+  deriv_coefs <- c(cubic_coefs[2,1] - linear_slope, 2*cubic_coefs[3,1], 3*cubic_coefs[4,1])
+  roots <- polyroot(deriv_coefs)
+  real_roots <- Re(roots[abs(Im(roots)) <= 1e-10 & Re(roots) >= min(df_small$Speed) & Re(roots) <= max(df_small$Speed)])
+  real_roots
+}
+```
+Testing it on the athlete sample data...
+```{r}
+DMax(Athlete_Sample_Data)
+```
+
+Now, let's create the graph to show that this is indeed the point of maximum perpendicular distance between L1 and L2.
+```{r}
+df_small <- Athlete_Sample_Data[c(1, length(Athlete_Sample_Data$Lactate)), ]
+linear_model <- lm(Lactate ~ Speed, data = df_small)
+linear_coefs <- data.frame(linear_model$coefficients)
+linear_slope <- linear_coefs[2,1]
+linear_intercept <- linear_coefs[1,1]
+cubic_model <- lm(Lactate ~ poly(Speed,3, raw = T), data = Athlete_Sample_Data)
+cubic_coefs <- data.frame(cubic_model$coefficients)
+cubic_intersect <- (cubic_coefs[4,1]*(DMax(Athlete_Sample_Data))^3) + (cubic_coefs[3,1]*(DMax(Athlete_Sample_Data))^2) + (cubic_coefs[2,1]*(DMax(Athlete_Sample_Data))) + (cubic_coefs[1,1])
+linear_intersect <- linear_slope*DMax(Athlete_Sample_Data) + linear_intercept
+
+sol <- DMax(Athlete_Sample_Data)
+b2 <- cubic_intersect + ((1/linear_slope)*sol)
+s2 <- -(1/linear_slope)
+
+segment_df1 <- data.frame(x1 = DMax(Athlete_Sample_Data), x2 = DMax(Athlete_Sample_Data), y1 = -Inf, y2 = cubic_intersect)
+segment_df2 <- data.frame(x1 = DMax(Athlete_Sample_Data), x2 = 12.48098, y1 = cubic_intersect, y2 = 2.9152)
+
+ggplot(data = Athlete_Sample_Data, aes(x = Speed, y = Lactate)) + 
+  geom_point() +
+  geom_abline(slope = linear_slope, intercept = linear_intercept) + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = F) + 
+  geom_segment(aes(x = x1, y = y1, xend = x2, yend = y2), data = segment_df1) + 
+  geom_segment(aes(x = x1, y = y1, xend = x2, yend = y2), data = segment_df2) + 
+  coord_fixed() + 
+  labs(x = "Speed (km/hr)", y = "Lactate (mM)") + 
+  ggtitle('Maximum Perpendicular Distance Using Cubic Regression (DMax = 13.854)') + 
+  theme(plot.title = element_text(hjust = 0.5, size = 12.5), 
+        text = element_text(family = "serif"),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_text(size = 11, color = "black"),
+        axis.text.y = element_text(size = 11, color = "black"))
+```
+
+Note that the respective scales of the x and y axes need to be equivalent in order to observe the perpendicularity of the two lines (otherwise, it looks wrong).
+
+## Fifth endurance marker: Modified DMax
+The modified DMax endurance marker is essentially the same as the DMax marker, except instead of using the first point in the data set, we use the point **before** the first increase in 0.4 mmol/L. Thus, L2 now connects this point to the last point in the data set, and modified DMax represents the point of maximum perpendicular distance from L1 to L2.
+My function takes a data frame (assumed to have a column called "Lactate" and a column called "Speed"), and returns the desired speed value.
+```{r}
+ModDMax <- function(df) {
+  df <- df %>%
+    drop_na()
+  above <- which(df$Lactate > (df$Lactate[1] + 0.4))
+  first_row_index <- above[1] - 1
+  df_small <- df[c(first_row_index, length(df$Lactate)), ]
+  linear_model <- lm(Lactate ~ Speed, data = df_small)
+  linear_coefs <- data.frame(linear_model$coefficients)
+  linear_slope <- linear_coefs[2,1]
+  
+  cubic_model <- lm(Lactate ~ poly(Speed,3, raw = T), data = df)
+  cubic_coefs <- data.frame(cubic_model$coefficients)
+  deriv_coefs <- c(cubic_coefs[2,1] - linear_slope, 2*cubic_coefs[3,1], 3*cubic_coefs[4,1])
+  roots <- polyroot(deriv_coefs)
+  real_roots <- Re(roots[abs(Im(roots)) <= 1e-10 & Re(roots) >= min(df_small$Speed) & Re(roots) <= max(df$Speed)])
+  real_roots
+}
+```
+Trying it out on the athlete sample data...
+```{r}
+ModDMax(Athlete_Sample_Data)
+```
+
+And now, let's show that this is a reasonable result by taking a look at the corresponding graph.
+```{r}
+above <- which(Athlete_Sample_Data$Lactate > (Athlete_Sample_Data$Lactate[1] + 0.4))
+first_row_index <- above[1] - 1
+df_small2 <- Athlete_Sample_Data[c(first_row_index, length(Athlete_Sample_Data$Lactate)), ]
+linear_model2 <- lm(Lactate ~ Speed, data = df_small2)
+linear_coefs2 <- data.frame(linear_model2$coefficients)
+linear_slope2 <- linear_coefs2[2,1]
+linear_intercept2 <- linear_coefs2[1,1]
+cubic_model2 <- lm(Lactate ~ poly(Speed,3, raw = T), data = Athlete_Sample_Data)
+cubic_coefs2 <- data.frame(cubic_model2$coefficients)
+cubic_intersect2 <- (cubic_coefs2[4,1]*(ModDMax(Athlete_Sample_Data))^3) + (cubic_coefs2[3,1]*(ModDMax(Athlete_Sample_Data))^2) + (cubic_coefs2[2,1]*(ModDMax(Athlete_Sample_Data))) + (cubic_coefs2[1,1])
+linear_intersect2 <- linear_slope2*ModDMax(Athlete_Sample_Data) + linear_intercept2
+
+sol2 <- ModDMax(Athlete_Sample_Data)
+b2 <- cubic_intersect2 + ((1/linear_slope2)*sol2)
+s2 <- -(1/linear_slope2)
+
+segment_df1 <- data.frame(x1 = ModDMax(Athlete_Sample_Data), x2 = ModDMax(Athlete_Sample_Data), y1 = -Inf, y2 = cubic_intersect2)
+segment_df2 <- data.frame(x1 = ModDMax(Athlete_Sample_Data), x2 = 13.767, y1 = cubic_intersect2, y2 = 2.757)
+
+ggplot(data = Athlete_Sample_Data, aes(x = Speed, y = Lactate)) + 
+  geom_point() +
+  geom_abline(slope = linear_slope2, intercept = linear_intercept2) + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 3), se = F) + 
+  geom_segment(aes(x = x1, y = y1, xend = x2, yend = y2), data = segment_df1) + 
+  geom_segment(aes(x = x1, y = y1, xend = x2, yend = y2), data = segment_df2) + 
+  coord_fixed() + 
+  labs(x = "Speed (km/hr)", y = "Lactate (mM)") + 
+  ggtitle('Modified Maximum Perpendicular Distance Using Cubic Regression (ModDMax = 14.524)') + 
+  theme(plot.title = element_text(hjust = 0.5, size = 12.5), 
+        text = element_text(family = "serif"),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.text.x = element_text(size = 11, color = "black"),
+        axis.text.y = element_text(size = 11, color = "black"))
+```
+
+Looks good! Note the same requirement for the ratio of the axis scales as we had for the regular DMax function.
+
+## Creating a global function to produce all endurance markers
+Now that we have created individual functions for each of the lactate endurance markers, we can call each of them within a larger function and return a data frame of all markers of interest.
+```{r}
+endurance_markers <- function(df, LT_interval = 0.01, log_interval = 0.001, fixed_value = 4, fixed_rise = 1, threshold = 0.1) {
+  df <- df %>%
+    drop_na()
+  final_df <- data.frame(c(0,0,0,0,0,0))
+  rownames(final_df) <- c("LT", "LT_log_log", "FBLC", "FRPB", "DMax", "Mod_DMax")
+  colnames(final_df) <- "Speed"
+  final_df[1,1] <- lactate_threshold(dataframe = df, interval = LT_interval, log_log = F)
+  final_df[2,1] <- round(exp(lactate_threshold(dataframe = df, interval = log_interval, log_log = T)), 3)
+  final_df[3,1] <- round(fixed_conc(df = df, value = fixed_value), 3)
+  final_df[4,1] <- round(from_baseline(df = df, value = fixed_rise, threshold = threshold), 3)
+  final_df[5,1] <- round(DMax(df = df), 3)
+  final_df[6,1] <- round(ModDMax(df = df), 3)
+  return(final_df)
+}
+```
+Let's try it out.
+```{r}
+endurance_markers(df = Athlete_Sample_Data)
+```
+
+
+## Cross-checking with an existing lactate R package
+After much searching, I finally came across an existing, up-to-date R package called cycleRtools which contains a Lactate Thresholds function. The function returns a data frame of endurance markers, which I will use to cross-check some of my own results. Let's run the function.
+```{r}
+head(LT(WR = Athlete_Sample_Data$Speed, La = Athlete_Sample_Data$Lactate, sig_rise = 1.0, plots = F), 5)
+```
+
+Here, we see that both of our methods resulted in a Lactate Threshold (LT) of 14.75. Taking the exponential of my LT_log_log value of 2.493 yields 12.09751, which is similar to the output of 12.06 given by the LT() function. Both methods calculated the 4 mmol FBLC to be 15.38. My 1 mmol FRBC value of 13.9657 is highly comparable to the value of 14.01 given by the above function (evidently differing only in the determination of the baseline lactate concentration). Finally, we both got 13.85 for the value of DMax.
+
+# Sensitivity Testing on Endurance Markers
+In carrying out blood lactate testing, it would be most practical to settle on using one of the endurance markers so that endurance can be compared across athletes, across trials, and across teams, for example. Naturally, then, we need to determine which of these markers is the most reliable, and we will do so by carrying out sensitivity testing. By looking at the impact on each of the six endurance markers when the first and last observations are removed, we can see which of the markers is most stable and can therefore be used to draw appropriate conclusions. We will make a function to do this.
+```{r}
+sensitivity <- function(df, LT_interval = 0.01, log_interval = 0.001, fixed_value = 4, fixed_rise = 1, threshold = 0.1) {
+  df_small <- df %>%
+    arrange(Speed) %>%
+    drop_na()
+  df_small <- df_small[c(-1, -length(df_small$Speed)),]
+  markers_small <- endurance_markers(df = df_small, LT_interval = LT_interval, log_interval = log_interval, fixed_value = fixed_value, fixed_rise = fixed_rise, threshold = threshold)
+  
+  df_big <- df %>%
+    drop_na()
+  markers_big <- endurance_markers(df = df_big, LT_interval = LT_interval, log_interval = log_interval, fixed_value = fixed_value, fixed_rise = fixed_rise, threshold = threshold)
+  
+  markers_diff <- abs(markers_small - markers_big)
+  colnames(markers_diff) <- "Marker_Diff"
+  
+  return(markers_diff)
+}
+```
+Let's test it out.
+```{r}
+sensitivity(Athlete_Sample_Data)
+```
+Now, we're going to iterate through a larger data set and find the average difference in marker values for each of the athletes in the data set. Some of the calls to the sensitivity function will not work, since some cubic models fitted to the data without the first and last observations do not intersect the 4 mmol/L fixed threshold. So I only iterate through the data sets which do not throw errors (47 trials in total).
+```{r}
+Lactate_Long <- read_excel("C:/Users/t_cla/Downloads/Lactate Long.xls")
+temp <- Lactate_Long[, c(1,2)]
+colnames(temp)[2] <- "Lactate"
+diff_df <- sensitivity(temp)
+for (i in (3:length(Lactate_Long))) {
+  skip_to_next = FALSE
+  temp2 <- Lactate_Long[, c(1,i)]
+  colnames(temp2)[2] <- "Lactate"
+  tryCatch(sensitivity(temp2), error = function(e) {skip_to_next <<- TRUE})
+  if(skip_to_next) {
+    next
+  }  
+  temp_diff <- sensitivity(temp2)
+  diff_df <- cbind(diff_df, temp_diff)
+}
+
+output <- data.frame(round(rowMeans(diff_df), 4))
+colnames(output) <- "Average Difference"
+output %>%
+  kbl() %>%
+  kable_classic_2(html_font = "Times New Roman", "striped", font_size = 16)
+```
+
+Here, we get some interesting results. Based on this process of conducting sensitivity testing (i.e. finding the absolute difference between the endurance markers when removing the first and last observations from the data set), we find that the most consistent endurance marker was actually fixed rise post baseline, with an average absolute difference of 0.087. Next came fixed blood lactate concentration at 0.131 and DMax at 0.207. The endurance markers with the highest sensitivity were lactate threshold, modified DMax, and LT log-log.
+
+I had also tried to plot a p-spline of the athlete sample data on the same graph as the cubic regression line, and it worked...just not in R Markdown for whatever reason. So that graph can be found in my other R script.
+
+While FRPB came out as the most consistent marker when we remove the first and last observations from the data, it is still a rather subjective marker between researchers. There is no agreed upon method for determining the baseline lactate value for a given athlete. Some calculations simply take the first data point to be the baseline. Mine, on the other hand, is determined by the standard deviation of the first collection of n data points. If it doesn't fall below a certain threshold, then we take the first (n-1) points instead. Furthermore, the rise of 1 mmol/L above baseline is an arbitrary value, and  Hence, we move to FBLC instead. FBLC is a consistent measure across all athletes with a definitive method of calculation. It also has a clearly defined meaning across athletes since the data point after the athlete reaches a lactate of 4 mmol/L is typically when the researcher stops recording. Hence, finding the speed/workload that corresponds to that 4 mmol/L "endpoint" provides a highly valid and consistent endurance marker to use for comparison both among trials of the same athlete and between athletes. It is for these reasons that we now turn to making a new function for FBLC.
+
+## New Spline-Based FBLC Function
+Now that we have focused our attention on the Fixed Blood Lactate Concentration marker, we can make it even more precise than the one we created before by basing it off of a fitted p-spline rather than cubic regression.
+```{r}
+fixed_conc_spline <- function(dataframe, value = 4, nseg = 20, bdeg = 3, lambda = 1) {
+  spline <- psNormal(x = dataframe$Speed, y = dataframe$Lactate, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  x_values <- seq(from = round(min(dataframe$Speed),3), to = round(max(dataframe$Speed),3), by = 0.001)
+  predicted_y <- predict(spline, x = x_values)
+  diff_values <- abs(predicted_y - value)
+  speed_location <- x_values[which.min(diff_values)]
+  speed_location
+}
+```
+
+Let's try it out.
+
+```{r}
+fixed_conc_spline(Athlete_Sample_Data)
+```
+As we can see, we now get 15.444 for the FBLC instead of the prior value of 15.38 -- similar, but more accurate this time!
+
+```{r}
+spline <- psNormal(x = Athlete_Sample_Data$Speed, y = Athlete_Sample_Data$Lactate, nseg = 20, bdeg = 3, lambda = 1)
+plot(spline, xlab = "Speed (km/hr)", ylab = "Lactate (mM)")
+abline(h = 4)
+segments(x0 = 15.444, y0 = 4, x1 = 15.444, y1 = 0)
+```
+
+
+But let's say we wanted to get a graphical sense of how precise this new function is. We'll do this by simulating 10000 samples of new data with noise based on our original fitted spline of the Athlete Sample Data. We'll set the standard deviation of the normally distributed noise at 0.25, as estimated visually from the graph of the spline's upper and lower bounds. Then, we'll run our new FBLC function on each of the samples, and plot all 10,000 markers in a histogram.
+```{r}
+spline <- psNormal(x = Athlete_Sample_Data$Speed, y = Athlete_Sample_Data$Lactate, nseg = 20, bdeg = 3, lambda = 1)
+x_values <- seq(from = 10, to = 16, by = 0.5)
+y_pred <- predict(spline, x = x_values)
+set.seed(1234)
+markers <- c()
+for (i in 1:10000) {
+  noise <- rnorm(13, mean = 0, sd = 0.25)
+  noisy_data <- y_pred + noise
+  new_df <- data.frame(x_values, noisy_data)
+  colnames(new_df) <- c("Speed", "Lactate")
+  new_marker <- fixed_conc_spline(new_df)
+  markers <- append(markers, new_marker)
+}
+hist(markers, xlab = "FBLC Endurance Marker at 4 mmol/L", main = "Histogram of FBLC", breaks = 20)
+```
+```{r}
+mean(abs(markers - 15.444))
+```
+We see that the markers are  Normally distributed, approximately centered about the "true" mean of 15.444. And while the generated noise had a standard deviation of 0.25, the markers only stray by, on average, about 0.048 from the "true" mean.
+
+Now, we'll make a function that produces a 95% confidence interval for the FBLC function by utilizing the upper and lower bounds given by the spline.
+```{r}
+fixed_conc_conf <- function(dataframe, value = 4, nseg = 20, bdeg = 3, lambda = 1){
+  spline <- psNormal(x = dataframe$Speed, y = dataframe$Lactate, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  lower_bound <- spline$ygrid + 2*(spline$se_eta)
+  xgrid <- spline$xgrid
+  lower_df <- data.frame(xgrid, lower_bound)
+  colnames(lower_df) <- c("Speed", "Lactate")
+  lower_marker <- fixed_conc_spline(dataframe = lower_df, value = value, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  
+  upper_bound <- spline$ygrid - 2*(spline$se_eta)
+  upper_df <- data.frame(xgrid, upper_bound)
+  colnames(upper_df) <- c("Speed", "Lactate")
+  upper_marker <- fixed_conc_spline(dataframe = upper_df, value = value, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  
+  marker <- fixed_conc_spline(dataframe = dataframe, value = value, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  
+  final_df <- data.frame(marker, lower_marker, upper_marker)
+  colnames(final_df) <- c("Calculated_Value", "Lower_Bound", "Upper_Bound")
+  rownames(final_df) <- "FBLC"
+  
+  return(final_df)
+}
+output1 <- fixed_conc_conf(Athlete_Sample_Data)
+output1 %>%
+  kbl() %>%
+  kable_classic_2(html_font = "Times New Roman", font_size = 16)
+```
+
+We can visualize these values by looking at the graph of the spline, as well as by plotting the upper and lower bounds as vertical lines in the plot.
+```{r}
+spline <- psNormal(x = Athlete_Sample_Data$Speed, y = Athlete_Sample_Data$Lactate, nseg = 20, bdeg = 3, lambda = 1)
+conf_df <- fixed_conc_conf(Athlete_Sample_Data)
+lower_bound <- conf_df$Lower_Bound
+upper_bound <- conf_df$Upper_Bound
+plot(spline, xlab = "Speed (km/hr)", ylab = "Lactate (mM)")
+abline(h = 4)
+segments(x0 = lower_bound, y0 = 4, x1 = lower_bound, y1 = 0)
+segments(x0 = upper_bound, y0 = 4, x1 = upper_bound, y1 = 0)
+```
+
+## D2LMax Function using the smooth.Pspline function in the psplines package
+Now, we wish to calculate one more endurance marker. Known as D2LMax, it represents the speed at which the second derivative of the lactate curve is at its maximum. We'll first calculate it using the smooth.Pspline function.
+```{r}
+D2LMax_psp <- function(dataframe, norder = 3, method = 2) {
+  fit_psp <- smooth.Pspline(x = dataframe$Speed, y = dataframe$Lactate, norder = norder, df = (length(dataframe$Lactate) - 3), method = method)
+  speed_values <- seq(from = min(dataframe$Speed), to = max(dataframe$Speed), length = 1000)
+  deriv_fit_psp <- predict(fit_psp, speed_values, nderiv = 2)
+  local_max <- peaks(deriv_fit_psp)
+  speed_values[which(local_max)]
+}
+D2LMax_psp(Athlete_Sample_Data)
+```
+As you can see, the function returns all peaks in the data set of the second derivatives identified by the peaks function. While not particularly convenient for the user, this issue is not one that can be precisely remedied. Just as R does not know which local maximum the user would like to identify, it is likewise not always clear to the user which one they want. It is not always true that the user wants the speed value for which the local maximum is the greatest, nor do they always want the xth one in the list (of variable length). The user will probably have to determine it visually from a plot of the second derivative. I have tried altering the function above to return only the local maximum that is closest to the lactate threshold, but that does not consistently return the desirable maximum either. What's more, there is no clear way to construct a confidence interval for these calculated D2LMax values, since the smooth.Pspline function returns no standard error or error bounds for the spline. The calculated D2LMax also depends heavily on the values inputted into the function for the order, degrees of freedom, and method.
+
+```{r}
+fit_psp <- smooth.Pspline(x = Athlete_Sample_Data$Speed, y = Athlete_Sample_Data$Lactate, norder = 3, df = (length(Athlete_Sample_Data$Lactate) - 3), method = 2)
+speed_values <- seq(from = min(Athlete_Sample_Data$Speed), to = max(Athlete_Sample_Data$Speed), length = 1000)
+deriv_fit_psp <- predict(fit_psp, speed_values, nderiv = 2)
+plot(x = speed_values, y = deriv_fit_psp, xlab = "Speed (km/hr)", ylab = "Second Derivative of Lactate")
+```
+
+
+
+## D2LMax Function using the psNormal_Deriv function in the JOPS package
+Here, we'll try to use a newer package, called JOPS (short for "Joys of P-Splines"), to try to calculate the D2LMax in a slightly different way.
+```{r}
+D2LMax_JOPS <- function(dataframe, nseg = 50, bdeg = 3, lambda = 1) {
+  spline_first_deriv <- psNormal_Deriv(x = dataframe$Speed, y = dataframe$Lactate, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  x_val <- spline_first_deriv$xgrid
+  y_deriv <- spline_first_deriv$d_pred
+  spline_second_deriv <- psNormal_Deriv(x = x_val, y = y_deriv, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  y_deriv2 <- spline_second_deriv$d_pred
+  spline_for_2deriv <- psNormal(x = x_val, y = y_deriv2, nseg = nseg, bdeg = bdeg, lambda = lambda)
+
+  x_values_long <- seq(from = round(min(dataframe$Speed),3), to = round(max(dataframe$Speed),3), length = 1000)
+  second_deriv_pred <- predict(spline_for_2deriv, x = x_values_long)
+  local_max <- peaks(second_deriv_pred)
+  x_values_long[which(local_max)]
+}
+D2LMax_JOPS(Athlete_Sample_Data)
+```
+As we can see, this function also produces several values, since they were all identified as local maxima by the peaks function (and it is hard, as stated before, to remedy this issue of identifying the speed that we want). That being said, the values of 10.28828 and 12.22222 are similar to the 10.12613 and 12.16216 produced by the psplines-based function. Again, changing attributes of the spline such as the number of segments, the degree of the polynomials, and the smoothing parameter lambda will have a large impact on the values outputted. While it may seem straightforward to construct a confidence interval for this function by utilizing the upper and lower bounds automatically given by the psNormal function, it actually won't help up. First, if we tried to take the upper bound as the true spline and use this function to calculate its D2LMax, it won't always be greater than the original calculated value (and the same for the lower bound). Furthermore, simply finding the second derivative spline and taking the upper and lower bounds of the speed at the D2LMax point won't help us either, since at that point, the upper, lower, and actual values for the speed are the same (they only differ in terms of the estimated lactate at those speeds, which doesn't help us).
+
+```{r}
+spline_first_deriv <- psNormal_Deriv(x = Athlete_Sample_Data$Speed, y = Athlete_Sample_Data$Lactate, nseg = 100, bdeg = 3, lambda = .1)
+  x_val <- spline_first_deriv$xgrid
+  y_deriv <- spline_first_deriv$d_pred
+  spline_second_deriv <- psNormal_Deriv(x = x_val, y = y_deriv, nseg = 100, bdeg = 3, lambda = .1)
+  y_deriv2 <- spline_second_deriv$d_pred
+  spline_for_2deriv <- psNormal(x = x_val, y = y_deriv2, nseg = 100, bdeg = 3, lambda = .1)
+
+  x_values_long <- seq(from = round(min(Athlete_Sample_Data$Speed),3), to = round(max(Athlete_Sample_Data$Speed),3), length = 1000)
+  second_deriv_pred <- predict(spline_for_2deriv, x = x_values_long)
+  plot(x_values_long, second_deriv_pred, xlab = "Speed (km/hr)", ylab = "Second Derivative of Lactate")
+```
+
+Now, we would like to build a function which produces a confidence interval for the calculated D2LMax given a particular data frame. We will first call the D2LMax_JOPS function on the data to find all of the local maxima, fit a spline for the original data, as well as splines for the upper and lower bounds of the original data spline. We will then predict y-values at the local maxima on the upper and lower splines, and use the fixed_conc_spline function to find the corresponding x-values on the original spline to get a confidence interval of sorts.
+
+```{r}
+D2LMax_conf <- function(dataframe, nseg = 50, bdeg = 3, lambda = 1) {
+  maxima <- D2LMax_JOPS(dataframe, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  first_maximum <- maxima[1]
+  orig <- psNormal(x = dataframe$Speed, y = dataframe$Lactate, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  final_df <- data.frame(0,0,0)
+  colnames(final_df) <- c("Calculated_Value", "Lower_Bound", "Upper_Bound")
+  final_df[1,1] <- first_maximum
+  
+  lower_se <- orig$ygrid - 2*(orig$se_eta)
+  lower_spline <- psNormal(x = orig$xgrid, y = lower_se, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  pred_lower_spline <- predict(lower_spline, x = first_maximum)
+  lower_bound <- fixed_conc_spline(dataframe, value = pred_lower_spline, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  final_df[1,2] <- lower_bound
+  
+  upper_se <- orig$ygrid + 2*(orig$se_eta)
+  upper_spline <- psNormal(x = orig$xgrid, y = upper_se, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  pred_upper_spline <- predict(upper_spline, x = first_maximum)
+  upper_bound <- fixed_conc_spline(dataframe, value = pred_upper_spline, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  final_df[1,3] <- upper_bound
+  
+  for (i in 2:length(maxima)) {
+    next_maximum <- maxima[i]
+    temp <- data.frame(0,0,0)
+    colnames(temp) <- c("Calculated_Value", "Lower_Bound", "Upper_Bound")
+    temp[1,1] <- next_maximum
+    
+    pred_lower_spline <- predict(lower_spline, x = next_maximum)
+    lower_bound <- fixed_conc_spline(dataframe, value = pred_lower_spline, nseg = nseg, bdeg = bdeg, lambda = lambda)
+    temp[1,2] <- lower_bound
+    
+    pred_upper_spline <- predict(upper_spline, x = next_maximum)
+    upper_bound <- fixed_conc_spline(dataframe, value = pred_upper_spline, nseg = nseg, bdeg = bdeg, lambda = lambda)
+    temp[1,3] <- upper_bound
+    
+    final_df <- rbind(final_df, temp)
+  }
+  return(final_df)
+}
+
+D2LMax_conf(Athlete_Sample_Data) %>%
+   kbl() %>%
+  kable_classic_2(html_font = "Times New Roman", font_size = 16)
+```
+
+To see why the method for the confidence interval we have devised does not always work, we need to take a look at the original spline for the data.
+```{r}
+orig <- psNormal(x = Athlete_Sample_Data$Speed, y = Athlete_Sample_Data$Lactate, nseg = 50, bdeg = 3, lambda = 1)
+plot(orig, xlab = "Speed (km/hr)", ylab = "Lactate (mM)", main = "P-Spline Fit for a Typical Blood Lactate Curve")
+```
+At the first local maximum of 10.288 (obviously not the one we care about, but a local maximum nonetheless), the spline is relatively flat, so finding the corresponding x-value for upper and lower y on the original spline yields values further up the spline than we would like for a confidence interval (and there really isn't a way to remedy this). Luckily, we don't really care about this value anyways. For the second calculated value (i.e. the one we want), the confidence interval is rather large, once again simply due to the shape of the line. Tracing the upper and lower y-values gives us a wider interval than we would hope for. This shows us that we are ultimately at the mercy of the spline shape in terms of how accurate of a confidence interval we can get out of it. While the interval for the last calculated value is stellar, we again don't care about this returned value for D2LMax, so the tight CI doesn't really mean anything to us. Ultimately, we see that there is no good way of calculating a confidence interval for the D2LMax endurance marker. While a consistent and objectively meaningful lactate marker, D2LMax falls short in its ability to quantify reliability. I, therefore, suggest the use of FBLC as a simple, consistent, and quantifiably reliable metric for measuring endurance in athletes.  
+
+There is one other thing that we can try regarding the calculation of a reasonable confidence interval for D2LMAx. Previously (in another R script), I had tried taking the upper and lower splines for the original lactate data and passing those into a previously made D2LMax function to see if they would produce values consistently above/below the calculated value (thereby serving as a confidence interval of sorts). Though unsuccessful, I am going to try varying the number of segments in the spline, as well as the value of lambda to see if the way in which the data is fitted might play a role in the acquisition of a reasonable interval. This method of experimentation wouldn't really help our problem that we uncovered in the above D2LMax_conf function, since the shape of the lactate curve isn't fundamentally going to change. Let's try it out, starting first with just the upper bound. Here, we'll assume that the real value for D2LMax is 12.222.
+
+```{r}
+lam <- c(.1, .5, 1, 5, 10, 50)
+seg <- seq(from = 10, to = 100, by = 10)
+orig <- psNormal(x = Athlete_Sample_Data$Speed, y = Athlete_Sample_Data$Lactate, bdeg = 3, nseg = 50, lambda = 1)
+upper_bound <- orig$ygrid - 2*(orig$se_eta)
+lower_bound <- orig$ygrid + 2*(orig$se_eta)
+xgrid <- orig$xgrid
+df_upper <- data.frame(xgrid, upper_bound)
+df_lower <- data.frame(xgrid, lower_bound)
+colnames(df_upper) <- c("Speed", "Lactate")
+colnames(df_lower) <- c("Speed", "Lactate")
+first_upper <- D2LMax_JOPS(dataframe = df_upper, nseg = 5, lambda = .1)
+upper_value <- first_upper[which.min(abs(first_upper - 12.222))]
+first_lower <- D2LMax_JOPS(dataframe = df_lower, nseg = 5, lambda = .1)
+lower_value <- first_lower[which.min(abs(first_lower - 12.222))]
+final_df <- data.frame(lower_value, upper_value)
+colnames(final_df) <- c("Lower Bound", "Upper Bound")
+rownames(final_df) <- paste0("nseg = 5, lambda = .1")
+for (lamby in lam) {
+  for (seggy in seg) {
+    upper_output <- D2LMax_JOPS(dataframe = df_upper, nseg = seggy, lambda = lamby)
+    upper_value <- upper_output[which.min(abs(upper_output - 12.222))]
+    if (length(upper_value) == 0) {
+      next
+    }
+    lower_output <- D2LMax_JOPS(dataframe = df_lower, nseg = seggy, lambda = lamby)
+    lower_value <- lower_output[which.min(abs(lower_output - 12.222))]
+    if (length(lower_value) == 0) {
+      next
+    }
+    temp_df <- data.frame(lower_value, upper_value)
+    row_name <- paste0("nseg = ", seggy, " lambda =", lamby)
+    rownames(temp_df) <- row_name
+    colnames(temp_df) <- c("Lower Bound", "Upper Bound")
+    final_df <- rbind(final_df, temp_df)
+  }
+}
+
+final_df %>%
+  filter(`Lower Bound` < 12.222 & `Upper Bound` > 12.222) %>%
+   kbl() %>%
+  kable_classic_2(html_font = "Times New Roman", font_size = 16)
+
+```
+
+By filtering the data frame output to include only the rows which contain an upper bound > 12.222 and a lower bound < 12.222, we see that generally, overfitting the data (either by decreasing the smoothing parameter or by increasing the number of segments) yields a reasonable confidence interval more consistently. 
+
+The consistency and convergence of the values when the spline overfits the data also corroborates the claim that the calculated value for D2LMax is more accurate with a relatively low lambda and a relatively high nseg. I will therefore make a new confidence interval function in which the splines overfit the data for both the calculated value and the upper/lower bound values.
+```{r}
+D2LMax_conf2 <- function(dataframe, nseg = 100, bdeg = 3, lambda = .1) {
+  maxima <- D2LMax_JOPS(dataframe, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  first_maximum <- maxima[1]
+  orig <- psNormal(x = dataframe$Speed, y = dataframe$Lactate, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  final_df <- data.frame(0,0,0)
+  colnames(final_df) <- c("Calculated_Value", "Lower_Bound", "Upper_Bound")
+  final_df[1,1] <- first_maximum
+  
+  upper_bound <- orig$ygrid - 2*(orig$se_eta)
+  lower_bound <- orig$ygrid + 2*(orig$se_eta)
+  xgrid <- orig$xgrid
+  df_upper <- data.frame(xgrid, upper_bound)
+  df_lower <- data.frame(xgrid, lower_bound)
+  colnames(df_upper) <- c("Speed", "Lactate")
+  colnames(df_lower) <- c("Speed", "Lactate")
+  first_upper <- D2LMax_JOPS(dataframe = df_upper, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  upper_value <- first_upper[which.min(abs(first_upper - first_maximum))]
+  first_lower <- D2LMax_JOPS(dataframe = df_lower, nseg = nseg, bdeg = bdeg, lambda = lambda)
+  lower_value <- first_lower[which.min(abs(first_lower - first_maximum))]
+  final_df[1,2] <- lower_value
+  final_df[1,3] <- upper_value
+  
+  for (i in 2:length(maxima)) {
+    next_maximum <- maxima[i]
+    temp <- data.frame(0,0,0)
+    colnames(temp) <- c("Calculated_Value", "Lower_Bound", "Upper_Bound")
+    temp[1,1] <- next_maximum
+    
+    outer_upper <- D2LMax_JOPS(dataframe = df_upper, nseg = nseg, bdeg = bdeg, lambda = lambda)
+    upper_value <- outer_upper[which.min(abs(outer_upper - next_maximum))]
+    if (length(upper_value) == 0) {
+      temp[1,2] <- "Error"
+    }
+    
+    lower_output <- D2LMax_JOPS(dataframe = df_lower, nseg = nseg, bdeg = bdeg, lambda = lambda)
+    lower_value <- lower_output[which.min(abs(lower_output - next_maximum))]
+    if (length(lower_value) == 0) {
+      temp[1,3] <- "Error"
+    }
+    
+    temp[1,2] <- lower_value
+    temp[1,3] <- upper_value
+    final_df <- rbind(final_df, temp)
+  }
+  return(final_df)
+}
+output2 <- round(D2LMax_conf2(Athlete_Sample_Data)[2,],4)
+rownames(output2) <- "D2LMax"
+output2 %>%
+  format(nsmall = 4) %>%
+   kbl() %>%
+  kable_classic_2(html_font = "Times New Roman", font_size = 16)
+```
+Look at that awesome confidence interval for the second entry! Presumably, the user will have seen a graph of the second derivative beforehand and would therefore be able to tell that the second entry is the one they want. Wow, that's awesome! Obviously, the values in the top entry don't make much sense, but again, we don't care about that.
